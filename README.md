@@ -4,42 +4,42 @@
 [![C++](https://img.shields.io/badge/C++-17-blue.svg)](https://isocpp.org/)
 [![Python](https://img.shields.io/badge/Python-3.9%2B-blue.svg)](https://python.org)
 
-**Open-source Offline Programming Software for Industrial Robots**
+**开源工业机器人离线编程软件**
 
-A free, extensible, and community-driven alternative to commercial OLP tools like RoboDK, Robotmaster, and Delmia.
+一款免费、可扩展且由社区驱动的商业 OLP 工具替代品，可替代 RoboDK、Robotmaster 和 Delmia。
 
-> **Vision**: Democratize industrial robot programming through open standards (URDF), transparent algorithms, and a community-curated post-processor ecosystem.
+> **愿景**：通过开放标准（URDF）、透明算法以及社区维护的后处理器生态，普及工业机器人编程。
 
 ---
 
-## Key Features
+## 核心功能
 
-| Feature | Status | Description |
+| 功能 | 状态 | 说明 |
 |---------|--------|-------------|
-| **Multi-brand robots** | ✅ MVP | URDF-based unified modeling; supports UR, KUKA, ABB, FANUC, HuiChuan |
-| **Offline Programming** | ✅ MVP | Python API + chainable motion commands (MoveJ / MoveL) |
-| **Post-processors** | ✅ MVP | Template-based code generation (Jinja2); community extensible |
-| **Kinematics** | ✅ MVP | FK/IK via Pinocchio; analytic + numerical solvers |
-| **Collision Detection** | 🔄 Scaffold | FCL integration planned for v0.2 |
-| **3D GUI** | 📋 Planned | Qt6 + OpenGL viewport (v0.3) |
-| **ROS2 Digital Twin** | 📋 Planned | Native rclpy bridge for real-time sync |
-| **Trajectory Optimization** | 📋 Planned | TOPP-RA time-optimal parameterization |
+| **多品牌机器人** | ✅ MVP | 基于 URDF 的统一建模；支持 UR、KUKA、ABB、FANUC、汇川 |
+| **离线编程** | ✅ MVP | Python API + 可链式运动指令（MoveJ / MoveL） |
+| **后处理器** | ✅ MVP | 基于模板（Jinja2）的代码生成；社区可扩展 |
+| **运动学** | ✅ MVP | 基于 Pinocchio 的正/逆运动学；解析 + 数值求解器 |
+| **碰撞检测** | 🔄 脚手架 | FCL 集成计划 v0.2 完成 |
+| **3D GUI** | 📋 规划中 | Qt6 + OpenGL 视口（v0.3） |
+| **ROS2 数字孪生** | 📋 规划中 | 原生 rclpy 桥接，实现实时同步 |
+| **轨迹优化** | 📋 规划中 | TOPP-RA 时间最优参数化 |
 
 ---
 
-## Quick Start
+## 快速开始
 
-### Prerequisites
+### 前置依赖
 
 - **C++**: GCC 9+ / Clang 12+ / MSVC 2019+
 - **CMake**: 3.16+
-- **Python**: 3.9, 3.10, 3.11, or 3.12
-- **System deps**: `eigen3`, `pinocchio`, `fcl`, `pybind11`
+- **Python**: 3.9、3.10、3.11 或 3.12
+- **系统依赖**: `eigen3`、`pinocchio`、`fcl`、`pybind11`
 
 **Ubuntu 22.04/24.04:**
 ```bash
 sudo apt update
-sudo apt install -y build-essential cmake libeigen3-dev     libpinocchio-dev libfcl-dev pybind11-dev python3-dev     python3-pip qt6-base-dev  # optional for GUI
+sudo apt install -y build-essential cmake libeigen3-dev     libpinocchio-dev libfcl-dev pybind11-dev python3-dev     python3-pip qt6-base-dev  # GUI 可选
 ```
 
 **macOS:**
@@ -47,39 +47,39 @@ sudo apt install -y build-essential cmake libeigen3-dev     libpinocchio-dev lib
 brew install cmake eigen pinocchio fcl pybind11 qt@6
 ```
 
-### Build & Install
+### 编译与安装
 
 ```bash
 git clone https://github.com/your-org/openrobolp.git
 cd openrobolp
 
-# Create virtual environment (recommended)
+# 创建虚拟环境（推荐）
 python3 -m venv .venv
 source .venv/bin/activate
 
-# Install Python deps
+# 安装 Python 依赖
 pip install -e ".[dev]"
 
-# Build C++ core + Python bindings
+# 编译 C++ 核心 + Python 绑定
 mkdir build && cd build
 cmake .. -DBUILD_PYTHON_BINDINGS=ON -DCMAKE_BUILD_TYPE=Release
 make -j$(nproc)
 cd ..
 
-# The C++ module is now importable as `orolp.orolp_core`
+# C++ 模块现在可通过 `orolp.orolp_core` 导入
 python -c "import orolp; print(orolp.__version__)"
 ```
 
-### Your First Program
+### 第一个程序
 
 ```python
 import orolp as orp
 
-# Load robot model
+# 加载机器人模型
 robot = orp.Robot("models/ur/ur5e.urdf", name="UR5")
 robot.tool = orp.Pose.from_xyz_rpy(0, 0, 150, 0, 0, 0)
 
-# Define pick-and-place
+# 定义抓取与放置
 pick = orp.Pose.from_xyz_rpy(500, 200, 100, 0, 0, 0)
 place = orp.Pose.from_xyz_rpy(600, 300, 100, 0, 0, 0)
 
@@ -89,111 +89,111 @@ program = (
     .then(robot.moveL(place, speed=80, blend=5))
 )
 
-# Simulate & generate native code
+# 仿真并生成原生代码
 traj = program.simulate()
-print(f"Cycle time: {traj.duration():.2f}s")
+print(f"节拍时间: {traj.duration():.2f}s")
 
 ur_code = program.to_post("ur_polyscope")
 print(ur_code)
 ```
 
-See `examples/` for more: pick-and-place, welding paths, multi-robot sync.
+更多示例请见 `examples/`：抓取放置、焊接路径、多机器人同步等。
 
 ---
 
-## Architecture
+## 架构
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  Python API Layer (User Scripts, Node-based Editor)          │
+│  Python API 层（用户脚本、节点编辑器）                       │
 │  ─────────────────────────────────────────────────────────  │
 │  Robot · Pose · Motion · Program · SimulationWorld           │
 ├─────────────────────────────────────────────────────────────┤
-│  C++ Core Engine (Performance-critical)                      │
+│  C++ 核心引擎（性能关键路径）                                │
 │  ─────────────────────────────────────────────────────────  │
 │  RobotModel (Pinocchio) · MotionPlanner · CollisionWorld    │
 ├─────────────────────────────────────────────────────────────┤
-│  Post-Processor Ecosystem (Jinja2 Templates)                 │
+│  后处理器生态（Jinja2 模板）                                 │
 │  ─────────────────────────────────────────────────────────  │
-│  KUKA KRL · ABB RAPID · FANUC TP · URScript · HuiChuan     │
+│  KUKA KRL · ABB RAPID · FANUC TP · URScript · 汇川         │
 └─────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## Supported Robots & Controllers
+## 支持的机器人与控制器
 
-| Brand | Controller | Post-Processor | Tested |
+| 品牌 | 控制器 | 后处理器 | 已测试 |
 |-------|-----------|----------------|--------|
 | Universal Robots | PolyScope | `ur_polyscope` | ✅ |
 | KUKA | KRC4 | `kuka_krc4` | 🔄 |
 | ABB | IRC5 | `abb_irc5` | 🔄 |
 | FANUC | R-30iB | `fanuc_r30ib` | 🔄 |
-| HuiChuan (汇川) | InoTeach | `huichuan_inoteach` | 🔄 |
+| 汇川 | InoTeach | `huichuan_inoteach` | 🔄 |
 
-> 🔄 = Template implemented, pending real hardware validation
+> 🔄 = 模板已实现，待真实硬件验证
 
-**Adding a new brand takes < 30 minutes.** See [docs/post_dev_guide.md](docs/post_dev_guide.md).
-
----
-
-## Roadmap
-
-### v0.1.0 (Current — Alpha)
-- [x] C++ core with Pinocchio FK/IK
-- [x] Python bindings (pybind11)
-- [x] Chainable motion API
-- [x] 5 reference post-processors
-- [x] Trajectory interpolation (trapezoidal)
-
-### v0.2.0 (Beta)
-- [ ] FCL collision detection
-- [ ] Cartesian linear path with IK seeding
-- [ ] Work object / tool frame calibration
-- [ ] CI/CD with real URDF regression tests
-
-### v0.3.0 (Production Candidate)
-- [ ] Qt6 3D viewport
-- [ ] Node-based visual programming
-- [ ] ROS2 digital twin bridge
-- [ ] Plugin marketplace
-
-### v1.0.0 (Stable)
-- [ ] TOPP-RA trajectory optimization
-- [ ] Multi-robot coordination
-- [ ] Force-controlled process simulation
-- [ ] IEC 61131-3 PLC code generation
+**添加一个新品牌不到 30 分钟。** 详见 [docs/post_dev_guide.md](docs/post_dev_guide.md)。
 
 ---
 
-## Contributing
+## 路线图
 
-We welcome contributions from robotics engineers, researchers, and manufacturers.
+### v0.1.0（当前 — Alpha）
+- [x] 基于 Pinocchio 的 C++ 正/逆运动学核心
+- [x] Python 绑定（pybind11）
+- [x] 可链式运动 API
+- [x] 5 个参考后处理器
+- [x] 轨迹插值（梯形）
 
-- **Post-processors**: Add your robot brand — easiest entry point
-- **Core algorithms**: IK solvers, planners, calibration
-- **Documentation**: Tutorials, API docs, translations
-- **Testing**: Hardware validation reports
+### v0.2.0（Beta）
+- [ ] FCL 碰撞检测
+- [ ] 带 IK 种子点的笛卡尔直线路径
+- [ ] 工件 / 工具坐标系标定
+- [ ] 带真实 URDF 回归测试的 CI/CD
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines and [docs/post_dev_guide.md](docs/post_dev_guide.md) for post-processor development.
+### v0.3.0（生产候选版）
+- [ ] Qt6 3D 视口
+- [ ] 节点式可视化编程
+- [ ] ROS2 数字孪生桥接
+- [ ] 插件市场
+
+### v1.0.0（稳定版）
+- [ ] TOPP-RA 轨迹优化
+- [ ] 多机器人协同
+- [ ] 力控工艺仿真
+- [ ] IEC 61131-3 PLC 代码生成
 
 ---
 
-## License
+## 贡献
 
-OpenRoboOLP is licensed under the **Apache License 2.0**.
+我们欢迎机器人工程师、研究人员和制造商的贡献。
 
-Robot CAD models (URDFs, meshes) in `models/` may carry separate licenses from their original authors. See individual `README.md` files for details.
+- **后处理器**：添加你的机器人品牌 —— 最简单的切入点
+- **核心算法**：逆运动学求解器、路径规划、标定
+- **文档**：教程、API 文档、翻译
+- **测试**：硬件验证报告
+
+贡献指南请见 [CONTRIBUTING.md](CONTRIBUTING.md)，后处理器开发指南请见 [docs/post_dev_guide.md](docs/post_dev_guide.md)。
 
 ---
 
-## Acknowledgements
+## 许可证
+
+OpenRoboOLP 采用 **Apache License 2.0** 许可。
+
+`models/` 中的机器人 CAD 模型（URDF、网格）可能带有原作者的独立许可证。详见各目录下的 `README.md`。
+
+---
+
+## 致谢
 
 - [Pinocchio](https://github.com/stack-of-tasks/pinocchio) — INRIA / LAAS-CNRS
 - [FCL](https://github.com/flexible-collision-library/fcl) — Flexible Collision Library
 - [OMPL](https://ompl.kavrakilab.org/) — Open Motion Planning Library
-- [RoboDK](https://robodk.com/) — Inspiration and industry benchmark
+- [RoboDK](https://robodk.com/) — 灵感来源与行业标杆
 
 ---
 
-**Made with ❤️ by the open robotics community.**
+**由开源机器人社区用 ❤️ 打造。**
