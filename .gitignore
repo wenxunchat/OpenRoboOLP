@@ -1,24 +1,43 @@
-# Logs
-logs
-*.log
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
-lerna-debug.log*
+# Build artifacts
+build/
+cmake-build-*/
+dist/
+*.egg-info/
+__pycache__/
+*.so
+*.pyd
+*.dll
+*.dylib
 
-node_modules
-dist
-dist-ssr
-*.local
-
-# Editor directories and files
-.vscode/*
-!.vscode/extensions.json
-.idea
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
 .DS_Store
-*.suo
-*.ntvs*
-*.njsproj
-*.sln
-*.sw?
+
+# Python
+.venv/
+venv/
+env/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+
+# Documentation
+docs/_build/
+
+# Models / large files (use Git LFS if needed)
+*.step
+*.stp
+*.iges
+*.igs
+*.stl
+*.ply
+*.urdf.bak
+
+# Temporary
+*.log
+*.tmp
+*.bak
