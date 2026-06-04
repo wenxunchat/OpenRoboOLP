@@ -41,3 +41,5 @@ docs/_build/
 *.log
 *.tmp
 *.bak
+install_deps.bat
+install_deps.ps1

@@ -7,25 +7,28 @@ post-processors.
 
 __version__ = "0.1.0"
 
-# Core C++ bindings
+# Core C++ bindings (optional)
 try:
     from . import orolp_core as _core
-except ImportError as e:
-    raise ImportError(
-        "C++ core module not found. Please build the project first:
-"
-        "  mkdir build && cd build && cmake .. -DBUILD_PYTHON_BINDINGS=ON && make"
-    ) from e
+    _has_core = True
+except ImportError:
+    _has_core = False
+    _core = None
 
 # Python user-layer API
-from .robot import Robot, Pose
-from .program import Program, Motion
-from .simulation import SimulationWorld
+from .pose import Pose
+from .robot import Robot
+from .program import Program, Motion, ProgramBuilder, MotionType
+from .simulation import SimulationWorld, Trajectory, Waypoint
 
 __all__ = [
     "Robot",
     "Pose",
     "Program",
     "Motion",
+    "ProgramBuilder",
+    "MotionType",
     "SimulationWorld",
+    "Trajectory",
+    "Waypoint",
 ]

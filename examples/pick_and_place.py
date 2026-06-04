@@ -6,9 +6,8 @@ Demonstrates joint moves, linear moves, tool frames, and post-processor generati
 
 import orolp as orp
 
-# Load a UR5e model (URDF must be present at this path)
-# You can download standard URDFs from github.com/ros-industrial/
-robot = orp.Robot("models/ur/ur5e.urdf", name="UR5_1")
+# Load a test 6-DOF robot model
+robot = orp.Robot("models/ur/test_6dof.urdf", name="TestRobot_6DOF")
 
 # Define tool frame: 150mm gripper offset along Z
 robot.tool = orp.Pose.from_xyz_rpy(0, 0, 150, 0, 0, 0)
@@ -45,10 +44,10 @@ print("\n--- KUKA KRL ---")
 print(program.to_post("kuka_krc4"))
 
 print("\n--- ABB RAPID ---")
-print(program.to_post("abb_irc5"))
+print(program.to_post("abb_rapid"))
 
 print("\n--- FANUC TP ---")
-print(program.to_post("fanuc_r30ib"))
+print(program.to_post("fanuc_tp"))
 
 print("\n--- HuiChuan InoTeach ---")
 print(program.to_post("huichuan_inoteach"))

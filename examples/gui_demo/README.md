@@ -9,6 +9,33 @@
 - CMake 3.16+
 - C++17 编译器
 
+
+### 快速启动（三种方式）
+方式一：Python 脚本（无需编译，立即可用）
+```bash
+pip install numpy scipy jinja2 pyyaml pydantic
+# 运行示例
+python examples/pick_and_place.py
+```
+
+方式二：Python 3D 视窗（零编译）
+```bash
+pip install PySide6 numpy
+python examples/gui_demo/python_viewer.py models/ur/test_6dof.urdf
+```
+
+方式三：C++ Qt6 原生视窗（性能最佳）
+```bash
+sudo apt install qt6-base-dev libqt6opengl6-dev libqt6openglwidgets6 \
+    libeigen3-dev libpinocchio-dev libfcl-dev pybind11-dev
+
+mkdir build && cd build
+cmake .. -DBUILD_GUI=ON -DBUILD_PYTHON_BINDINGS=ON
+make -j$(nproc)
+./bin/orolp_viewer ../models/ur/test_6dof.urdf
+```
+
+
 ### Ubuntu 22.04/24.04
 ```bash
 sudo apt install qt6-base-dev libqt6opengl6-dev libqt6openglwidgets6
