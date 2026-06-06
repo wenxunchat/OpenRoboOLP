@@ -88,6 +88,8 @@ def load_stl(filename):
     except Exception as e:
         print(f"Error loading STL {filename}: {e}")
         return []
+    
+    return []
 
 # OpenGL 常量（兼容直接引用）
 GL_COLOR_BUFFER_BIT = 0x00004000
