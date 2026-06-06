@@ -661,16 +661,17 @@ class GLWidget(QtOpenGLWidgets.QOpenGLWidget):
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             self.dragging = True
-            self.last_pos = event.pos()
+            self.last_pos = event.position().toPoint()
 
     def mouseMoveEvent(self, event):
         if self.dragging and self.last_pos:
-            dx = event.pos().x() - self.last_pos.x()
-            dy = event.pos().y() - self.last_pos.y()
+            current_pos = event.position().toPoint()
+            dx = current_pos.x() - self.last_pos.x()
+            dy = current_pos.y() - self.last_pos.y()
             self.camera_az -= dx * 0.5
             self.camera_el += dy * 0.5
             self.camera_el = max(-89, min(89, self.camera_el))
-            self.last_pos = event.pos()
+            self.last_pos = current_pos
             self.update()
 
     def mouseReleaseEvent(self, event):
