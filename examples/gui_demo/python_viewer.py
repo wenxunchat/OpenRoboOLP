@@ -302,6 +302,33 @@ class GLWidget(QtOpenGLWidgets.QOpenGLWidget):
     def initializeGL(self):
         gl.glClearColor(0.15, 0.15, 0.18, 1.0)
         gl.glEnable(GL_DEPTH_TEST)
+        
+        # Enable lighting for better 3D appearance
+        gl.glEnable(gl.GL_LIGHTING)
+        gl.glEnable(gl.GL_LIGHT0)
+        gl.glEnable(gl.GL_LIGHT1)
+        
+        # Light 0: Directional light from front/top
+        gl.glLightfv(gl.GL_LIGHT0, gl.GL_POSITION, np.array([1.0, 1.0, 2.0, 0.0], dtype=np.float32))
+        gl.glLightfv(gl.GL_LIGHT0, gl.GL_DIFFUSE, np.array([1.0, 1.0, 1.0, 1.0], dtype=np.float32))
+        gl.glLightfv(gl.GL_LIGHT0, gl.GL_SPECULAR, np.array([0.3, 0.3, 0.3, 1.0], dtype=np.float32))
+        
+        # Light 1: Fill light from opposite side
+        gl.glLightfv(gl.GL_LIGHT1, gl.GL_POSITION, np.array([-1.0, -1.0, 1.0, 0.0], dtype=np.float32))
+        gl.glLightfv(gl.GL_LIGHT1, gl.GL_DIFFUSE, np.array([0.3, 0.3, 0.3, 1.0], dtype=np.float32))
+        
+        # Material properties
+        gl.glEnable(gl.GL_COLOR_MATERIAL)
+        gl.glColorMaterial(gl.GL_FRONT, gl.GL_AMBIENT_AND_DIFFUSE)
+        gl.glMaterialfv(gl.GL_FRONT, gl.GL_SPECULAR, np.array([0.8, 0.8, 0.8, 1.0], dtype=np.float32))
+        gl.glMaterialf(gl.GL_FRONT, gl.GL_SHININESS, 50.0)
+        
+        # Enable anti-aliasing
+        gl.glEnable(gl.GL_LINE_SMOOTH)
+        gl.glEnable(gl.GL_POLYGON_SMOOTH)
+        gl.glHint(gl.GL_LINE_SMOOTH_HINT, gl.GL_NICEST)
+        gl.glHint(gl.GL_POLYGON_SMOOTH_HINT, gl.GL_NICEST)
+        
         # 将调试信息写入文件（避免终端缓冲问题）
         with open("viewer_debug.log", "w", encoding="utf-8") as f:
             fmt = self.context().format()
@@ -388,6 +415,27 @@ class GLWidget(QtOpenGLWidgets.QOpenGLWidget):
             gl.glVertex3f(size, x, 0)
         gl.glEnd()
 
+    def _draw_coordinate_system(self, gl, length=0.1):
+        """Draw a coordinate system with X (red), Y (green), Z (blue) axes."""
+        gl.glBegin(GL_LINES)
+        
+        # X axis - red
+        gl.glColor3f(1.0, 0.0, 0.0)
+        gl.glVertex3f(0, 0, 0)
+        gl.glVertex3f(length, 0, 0)
+        
+        # Y axis - green
+        gl.glColor3f(0.0, 1.0, 0.0)
+        gl.glVertex3f(0, 0, 0)
+        gl.glVertex3f(0, length, 0)
+        
+        # Z axis - blue
+        gl.glColor3f(0.0, 0.0, 1.0)
+        gl.glVertex3f(0, 0, 0)
+        gl.glVertex3f(0, 0, length)
+        
+        gl.glEnd()
+
     def _draw_robot(self, gl):
         """Recursively draw the kinematic tree with proper transforms."""
         if self.renderer.root_link is None:
@@ -404,33 +452,40 @@ class GLWidget(QtOpenGLWidgets.QOpenGLWidget):
 
         # Apply parent joint transform (for non-root links)
         if parent_joint is not None:
-            # Apply joint origin rotation (URDF extrinsic XYZ order)
-            jrx, jry, jrz = parent_joint["origin_rpy"]
-            if any(v != 0 for v in [jrx, jry, jrz]):
-                gl.glRotatef(math.degrees(jrx), 1, 0, 0)
-                gl.glRotatef(math.degrees(jry), 0, 1, 0)
-                gl.glRotatef(math.degrees(jrz), 0, 0, 1)
-            
-            # Apply joint origin translation
+            # Apply joint origin translation first
             jx, jy, jz = parent_joint["origin_xyz"]
             gl.glTranslatef(jx, jy, jz)
+            
+            # Apply joint origin rotation (URDF rpy = Z-Y-X extrinsic order)
+            jrx, jry, jrz = parent_joint["origin_rpy"]
+            if any(v != 0 for v in [jrx, jry, jrz]):
+                gl.glRotatef(math.degrees(jrz), 0, 0, 1)  # yaw (Z)
+                gl.glRotatef(math.degrees(jry), 0, 1, 0)  # pitch (Y)
+                gl.glRotatef(math.degrees(jrx), 1, 0, 0)  # roll (X)
+            
+            # Draw coordinate system at joint position (before joint rotation)
+            self._draw_coordinate_system(gl, 0.08)
+            
+            # Draw joint indicator at joint position
+            self._draw_joint_indicator(gl, 0.02)
             
             # Apply joint rotation (if revolute)
             q = r.joint_values.get(parent_joint["name"], 0.0)
             if parent_joint["type"] == "revolute" and q != 0:
                 ax, ay, az = parent_joint["axis"]
                 gl.glRotatef(math.degrees(q), ax, ay, az)
-
-        # Draw joint indicator at link origin
-        self._draw_joint_indicator(gl, 0.02)
+        else:
+            # Root link: draw indicator and coordinate system at origin
+            self._draw_coordinate_system(gl, 0.1)
+            self._draw_joint_indicator(gl, 0.02)
 
         # Apply link's visual origin (relative to link coordinate system)
         ox, oy, oz = link["origin_xyz"]
         orx, ory, orz = link["origin_rpy"]
         if any(v != 0 for v in [orx, ory, orz]):
-            gl.glRotatef(math.degrees(orx), 1, 0, 0)
-            gl.glRotatef(math.degrees(ory), 0, 1, 0)
-            gl.glRotatef(math.degrees(orz), 0, 0, 1)
+            gl.glRotatef(math.degrees(orz), 0, 0, 1)  # yaw (Z)
+            gl.glRotatef(math.degrees(ory), 0, 1, 0)  # pitch (Y)
+            gl.glRotatef(math.degrees(orx), 1, 0, 0)  # roll (X)
         gl.glTranslatef(ox, oy, oz)
 
         # Draw geometry
