@@ -9,6 +9,7 @@ Usage:
 
 import sys
 import math
+import struct
 import numpy as np
 from pathlib import Path
 
@@ -24,6 +25,71 @@ try:
 except ImportError:
     print("PyOpenGL not installed. Install with: pip install PyOpenGL")
     sys.exit(1)
+
+
+def load_stl(filename):
+    """Load an STL file (binary or ASCII)."""
+    try:
+        with open(filename, 'rb') as f:
+            # Check if it's a binary STL
+            header = f.read(80)
+            num_triangles = struct.unpack('<I', f.read(4))[0]
+            
+            # Quick check: if num_triangles * 50 bytes + 84 bytes equals file size, it's binary
+            f.seek(0, 2)
+            file_size = f.tell()
+            f.seek(84)
+            
+            if file_size == 84 + num_triangles * 50:
+                # Binary STL
+                triangles = []
+                for _ in range(num_triangles):
+                    normal = struct.unpack('<fff', f.read(12))
+                    v1 = struct.unpack('<fff', f.read(12))
+                    v2 = struct.unpack('<fff', f.read(12))
+                    v3 = struct.unpack('<fff', f.read(12))
+                    f.read(2)  # attribute count
+                    triangles.append((normal, v1, v2, v3))
+                return triangles
+    except Exception:
+        pass
+    
+    # Try ASCII STL
+    try:
+        with open(filename, 'r') as f:
+            content = f.read()
+        
+        lines = content.splitlines()
+        triangles = []
+        i = 0
+        
+        while i < len(lines):
+            line = lines[i].strip()
+            if line.startswith('facet normal'):
+                parts = line.split()
+                normal = (float(parts[2]), float(parts[3]), float(parts[4]))
+                i += 1
+                while i < len(lines) and not lines[i].strip().startswith('endfacet'):
+                    if lines[i].strip().startswith('outer loop'):
+                        i += 1
+                        vertices = []
+                        while i < len(lines) and not lines[i].strip().startswith('endloop'):
+                            line = lines[i].strip()
+                            if line.startswith('vertex'):
+                                parts = line.split()
+                                vertices.append((float(parts[1]), float(parts[2]), float(parts[3])))
+                            i += 1
+                        if len(vertices) == 3:
+                            triangles.append((normal, vertices[0], vertices[1], vertices[2]))
+                    i += 1
+            i += 1
+        
+        return triangles
+    except Exception as e:
+        print(f"Error loading STL {filename}: {e}")
+        return []
+    
+    return []
 
 # OpenGL 常量（兼容直接引用）
 GL_COLOR_BUFFER_BIT = 0x00004000
@@ -71,6 +137,9 @@ class RobotRenderer:
         self.link_joints = {}    # link_name -> incoming joint
         self.root_link = None
         self.joint_values = {}
+        self.meshes = {}         # mesh_file -> triangles
+        self.mesh_display_lists = {}  # mesh_file -> display_list_id
+        self.urdf_dir = None     # Directory of the URDF file
 
     def load_urdf(self, path):
         """Parse URDF and build kinematic tree."""
@@ -78,10 +147,21 @@ class RobotRenderer:
         tree = ET.parse(path)
         root = tree.getroot()
 
+        # Clear display lists to avoid memory leak
+        import OpenGL.GL as gl
+        for display_list_id in self.mesh_display_lists.values():
+            try:
+                gl.glDeleteLists(display_list_id, 1)
+            except:
+                pass
+        
         self.links.clear()
         self.joints.clear()
         self.link_joints.clear()
         self.joint_values.clear()
+        self.meshes.clear()
+        self.mesh_display_lists.clear()
+        self.urdf_dir = Path(path).parent
 
         # Parse links
         for link in root.findall("link"):
@@ -106,7 +186,14 @@ class RobotRenderer:
 
             geo_type = None
             params = ()
-            if geom.find("cylinder") is not None:
+            mesh_file = None
+            
+            if geom.find("mesh") is not None:
+                mesh = geom.find("mesh")
+                geo_type = "mesh"
+                mesh_file = mesh.get("filename")
+                params = (mesh_file,)
+            elif geom.find("cylinder") is not None:
                 cyl = geom.find("cylinder")
                 geo_type = "cylinder"
                 params = (float(cyl.get("radius", "0.03")), float(cyl.get("length", "0.15")))
@@ -123,10 +210,13 @@ class RobotRenderer:
                 "name": name,
                 "type": geo_type,
                 "params": params,
+                "mesh_file": mesh_file,
                 "origin_xyz": xyz,
                 "origin_rpy": rpy,
                 "color": rgba[:3],
             }
+
+        print(f"Loaded {len(self.links)} links from URDF")
 
         # Parse joints
         for joint in root.findall("joint"):
@@ -157,14 +247,21 @@ class RobotRenderer:
             self.link_joints[child] = self.joints[jname]
             self.joint_values[jname] = 0.0
 
-        # Find root link (no parent joint)
+        # Find root link (no parent joint, or parent is world)
         all_children = set(self.link_joints.keys())
         for name in self.links:
             if name not in all_children:
                 self.root_link = name
                 break
+        
+        # Special handling: if parent is 'world', child is the root
+        if self.root_link is None:
+            for j in self.joints.values():
+                if j["parent"] == "world" and j["child"] in self.links:
+                    self.root_link = j["child"]
+                    break
 
-        print(f"Loaded {len(self.links)} links, {len(self.joints)} joints from URDF")
+        print(f"Loaded {len(self.links)} links, {len(self.joints)} joints from URDF, root={self.root_link}")
         return len(self.links) > 0
 
     def set_joints(self, q_list):
@@ -207,6 +304,33 @@ class GLWidget(QtOpenGLWidgets.QOpenGLWidget):
     def initializeGL(self):
         gl.glClearColor(0.15, 0.15, 0.18, 1.0)
         gl.glEnable(GL_DEPTH_TEST)
+        
+        # Enable lighting for better 3D appearance
+        gl.glEnable(gl.GL_LIGHTING)
+        gl.glEnable(gl.GL_LIGHT0)
+        gl.glEnable(gl.GL_LIGHT1)
+        
+        # Light 0: Directional light from front/top
+        gl.glLightfv(gl.GL_LIGHT0, gl.GL_POSITION, np.array([1.0, 1.0, 2.0, 0.0], dtype=np.float32))
+        gl.glLightfv(gl.GL_LIGHT0, gl.GL_DIFFUSE, np.array([1.0, 1.0, 1.0, 1.0], dtype=np.float32))
+        gl.glLightfv(gl.GL_LIGHT0, gl.GL_SPECULAR, np.array([0.3, 0.3, 0.3, 1.0], dtype=np.float32))
+        
+        # Light 1: Fill light from opposite side
+        gl.glLightfv(gl.GL_LIGHT1, gl.GL_POSITION, np.array([-1.0, -1.0, 1.0, 0.0], dtype=np.float32))
+        gl.glLightfv(gl.GL_LIGHT1, gl.GL_DIFFUSE, np.array([0.3, 0.3, 0.3, 1.0], dtype=np.float32))
+        
+        # Material properties
+        gl.glEnable(gl.GL_COLOR_MATERIAL)
+        gl.glColorMaterial(gl.GL_FRONT, gl.GL_AMBIENT_AND_DIFFUSE)
+        gl.glMaterialfv(gl.GL_FRONT, gl.GL_SPECULAR, np.array([0.8, 0.8, 0.8, 1.0], dtype=np.float32))
+        gl.glMaterialf(gl.GL_FRONT, gl.GL_SHININESS, 50.0)
+        
+        # Enable anti-aliasing
+        gl.glEnable(gl.GL_LINE_SMOOTH)
+        gl.glEnable(gl.GL_POLYGON_SMOOTH)
+        gl.glHint(gl.GL_LINE_SMOOTH_HINT, gl.GL_NICEST)
+        gl.glHint(gl.GL_POLYGON_SMOOTH_HINT, gl.GL_NICEST)
+        
         # 将调试信息写入文件（避免终端缓冲问题）
         with open("viewer_debug.log", "w", encoding="utf-8") as f:
             fmt = self.context().format()
@@ -293,6 +417,27 @@ class GLWidget(QtOpenGLWidgets.QOpenGLWidget):
             gl.glVertex3f(size, x, 0)
         gl.glEnd()
 
+    def _draw_coordinate_system(self, gl, length=0.1):
+        """Draw a coordinate system with X (red), Y (green), Z (blue) axes."""
+        gl.glBegin(GL_LINES)
+        
+        # X axis - red
+        gl.glColor3f(1.0, 0.0, 0.0)
+        gl.glVertex3f(0, 0, 0)
+        gl.glVertex3f(length, 0, 0)
+        
+        # Y axis - green
+        gl.glColor3f(0.0, 1.0, 0.0)
+        gl.glVertex3f(0, 0, 0)
+        gl.glVertex3f(0, length, 0)
+        
+        # Z axis - blue
+        gl.glColor3f(0.0, 0.0, 1.0)
+        gl.glVertex3f(0, 0, 0)
+        gl.glVertex3f(0, 0, length)
+        
+        gl.glEnd()
+
     def _draw_robot(self, gl):
         """Recursively draw the kinematic tree with proper transforms."""
         if self.renderer.root_link is None:
@@ -309,33 +454,40 @@ class GLWidget(QtOpenGLWidgets.QOpenGLWidget):
 
         # Apply parent joint transform (for non-root links)
         if parent_joint is not None:
-            # Apply joint origin rotation (URDF extrinsic XYZ order)
-            jrx, jry, jrz = parent_joint["origin_rpy"]
-            if any(v != 0 for v in [jrx, jry, jrz]):
-                gl.glRotatef(math.degrees(jrx), 1, 0, 0)
-                gl.glRotatef(math.degrees(jry), 0, 1, 0)
-                gl.glRotatef(math.degrees(jrz), 0, 0, 1)
-            
-            # Apply joint origin translation
+            # Apply joint origin translation first
             jx, jy, jz = parent_joint["origin_xyz"]
             gl.glTranslatef(jx, jy, jz)
+            
+            # Apply joint origin rotation (URDF rpy = Z-Y-X extrinsic order)
+            jrx, jry, jrz = parent_joint["origin_rpy"]
+            if any(v != 0 for v in [jrx, jry, jrz]):
+                gl.glRotatef(math.degrees(jrz), 0, 0, 1)  # yaw (Z)
+                gl.glRotatef(math.degrees(jry), 0, 1, 0)  # pitch (Y)
+                gl.glRotatef(math.degrees(jrx), 1, 0, 0)  # roll (X)
+            
+            # Draw coordinate system at joint position (before joint rotation)
+            self._draw_coordinate_system(gl, 0.08)
+            
+            # Draw joint indicator at joint position
+            self._draw_joint_indicator(gl, 0.02)
             
             # Apply joint rotation (if revolute)
             q = r.joint_values.get(parent_joint["name"], 0.0)
             if parent_joint["type"] == "revolute" and q != 0:
                 ax, ay, az = parent_joint["axis"]
                 gl.glRotatef(math.degrees(q), ax, ay, az)
-
-        # Draw joint indicator at link origin
-        self._draw_joint_indicator(gl, 0.02)
+        else:
+            # Root link: draw indicator and coordinate system at origin
+            self._draw_coordinate_system(gl, 0.1)
+            self._draw_joint_indicator(gl, 0.02)
 
         # Apply link's visual origin (relative to link coordinate system)
         ox, oy, oz = link["origin_xyz"]
         orx, ory, orz = link["origin_rpy"]
         if any(v != 0 for v in [orx, ory, orz]):
-            gl.glRotatef(math.degrees(orx), 1, 0, 0)
-            gl.glRotatef(math.degrees(ory), 0, 1, 0)
-            gl.glRotatef(math.degrees(orz), 0, 0, 1)
+            gl.glRotatef(math.degrees(orz), 0, 0, 1)  # yaw (Z)
+            gl.glRotatef(math.degrees(ory), 0, 1, 0)  # pitch (Y)
+            gl.glRotatef(math.degrees(orx), 1, 0, 0)  # roll (X)
         gl.glTranslatef(ox, oy, oz)
 
         # Draw geometry
@@ -371,6 +523,10 @@ class GLWidget(QtOpenGLWidgets.QOpenGLWidget):
             gl.glTranslatef(radius + marker_size*0.5, 0, 0)
             self._draw_sphere(gl, marker_size*0.8)
             gl.glPopMatrix()
+        elif geo == "mesh":
+            mesh_file = link["mesh_file"]
+            if mesh_file:
+                self._draw_mesh(gl, mesh_file, link["color"])
 
         # Recursively draw child links through joints (transform is accumulated)
         for jname, joint in r.joints.items():
@@ -520,19 +676,59 @@ class GLWidget(QtOpenGLWidgets.QOpenGLWidget):
                 gl.glVertex3f(x * zr1, y * zr1, z1)
             gl.glEnd()
 
+    def _draw_mesh(self, gl, mesh_file, color):
+        """Draw an STL mesh using display list caching for performance."""
+        r = self.renderer
+        
+        # Check if mesh is already loaded
+        if mesh_file not in r.meshes:
+            # Resolve path relative to URDF file
+            mesh_path = (r.urdf_dir / mesh_file).resolve()
+            print(f"Loading mesh: {mesh_path}")
+            triangles = load_stl(str(mesh_path))
+            r.meshes[mesh_file] = triangles
+            print(f"Loaded {len(triangles)} triangles")
+        
+        # Check if display list exists, create if not
+        if mesh_file not in r.mesh_display_lists:
+            triangles = r.meshes.get(mesh_file, [])
+            if not triangles:
+                return
+            
+            # Create display list
+            display_list_id = gl.glGenLists(1)
+            gl.glNewList(display_list_id, gl.GL_COMPILE)
+            gl.glBegin(GL_TRIANGLES)
+            for normal, v1, v2, v3 in triangles:
+                gl.glNormal3f(*normal)
+                gl.glVertex3f(*v1)
+                gl.glVertex3f(*v2)
+                gl.glVertex3f(*v3)
+            gl.glEnd()
+            gl.glEndList()
+            r.mesh_display_lists[mesh_file] = display_list_id
+            print(f"Created display list for {mesh_file}")
+        
+        # Draw using display list
+        display_list_id = r.mesh_display_lists.get(mesh_file)
+        if display_list_id:
+            gl.glColor3f(*color)
+            gl.glCallList(display_list_id)
+
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             self.dragging = True
-            self.last_pos = event.pos()
+            self.last_pos = event.position().toPoint()
 
     def mouseMoveEvent(self, event):
         if self.dragging and self.last_pos:
-            dx = event.pos().x() - self.last_pos.x()
-            dy = event.pos().y() - self.last_pos.y()
+            current_pos = event.position().toPoint()
+            dx = current_pos.x() - self.last_pos.x()
+            dy = current_pos.y() - self.last_pos.y()
             self.camera_az -= dx * 0.5
             self.camera_el += dy * 0.5
             self.camera_el = max(-89, min(89, self.camera_el))
-            self.last_pos = event.pos()
+            self.last_pos = current_pos
             self.update()
 
     def mouseReleaseEvent(self, event):

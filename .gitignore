@@ -33,7 +33,9 @@ docs/_build/
 *.stp
 *.iges
 *.igs
+# Allow STL files in models/ directory (for robot models)
 *.stl
+!models/**/*.stl
 *.ply
 *.urdf.bak
 
