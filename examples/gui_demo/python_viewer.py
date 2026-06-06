@@ -9,10 +9,8 @@ Usage:
 
 import sys
 import math
-import struct
 import numpy as np
 from pathlib import Path
-import os
 
 try:
     from PySide6 import QtWidgets, QtCore, QtOpenGLWidgets, QtOpenGL
@@ -66,69 +64,6 @@ def euler_to_rotation(rpy):
     return R
 
 
-def load_stl(filename):
-    """Load an STL file (binary or ASCII)."""
-    try:
-        with open(filename, 'rb') as f:
-            # Check if it's a binary STL
-            header = f.read(80)
-            num_triangles = struct.unpack('<I', f.read(4))[0]
-            
-            # Quick check: if num_triangles * 50 bytes + 84 bytes equals file size, it's binary
-            f.seek(0, 2)
-            file_size = f.tell()
-            f.seek(84)
-            
-            if file_size == 84 + num_triangles * 50:
-                # Binary STL
-                triangles = []
-                for _ in range(num_triangles):
-                    normal = struct.unpack('<fff', f.read(12))
-                    v1 = struct.unpack('<fff', f.read(12))
-                    v2 = struct.unpack('<fff', f.read(12))
-                    v3 = struct.unpack('<fff', f.read(12))
-                    f.read(2)  # attribute count
-                    triangles.append((normal, v1, v2, v3))
-                return triangles
-    except Exception:
-        pass
-    
-    # Try ASCII STL
-    try:
-        with open(filename, 'r') as f:
-            content = f.read()
-        
-        lines = content.splitlines()
-        triangles = []
-        i = 0
-        
-        while i < len(lines):
-            line = lines[i].strip()
-            if line.startswith('facet normal'):
-                parts = line.split()
-                normal = (float(parts[2]), float(parts[3]), float(parts[4]))
-                i += 1
-                while i < len(lines) and not lines[i].strip().startswith('endfacet'):
-                    if lines[i].strip().startswith('outer loop'):
-                        i += 1
-                        vertices = []
-                        while i < len(lines) and not lines[i].strip().startswith('endloop'):
-                            line = lines[i].strip()
-                            if line.startswith('vertex'):
-                                parts = line.split()
-                                vertices.append((float(parts[1]), float(parts[2]), float(parts[3])))
-                            i += 1
-                        if len(vertices) == 3:
-                            triangles.append((normal, vertices[0], vertices[1], vertices[2]))
-                    i += 1
-            i += 1
-        
-        return triangles
-    except Exception as e:
-        print(f"Error loading STL {filename}: {e}")
-        return []
-
-
 class RobotRenderer:
     def __init__(self):
         self.links = {}          # name -> link data
@@ -136,33 +71,21 @@ class RobotRenderer:
         self.link_joints = {}    # link_name -> incoming joint
         self.root_link = None
         self.joint_values = {}
-        self.meshes = {}         # name -> STL triangles
-        self.mesh_display_lists = {}  # name -> display list ID
-        self.urdf_dir = None
 
     def load_urdf(self, path):
         """Parse URDF and build kinematic tree."""
         import xml.etree.ElementTree as ET
         tree = ET.parse(path)
         root = tree.getroot()
-        
-        self.urdf_dir = Path(path).parent
-        
+
         self.links.clear()
         self.joints.clear()
         self.link_joints.clear()
         self.joint_values.clear()
-        self.meshes.clear()
-        self.mesh_display_lists.clear()  # Clear display list cache
 
         # Parse links
         for link in root.findall("link"):
             name = link.get("name")
-            
-            # Skip 'world' link
-            if name == 'world':
-                continue
-            
             visual = link.find("visual")
             if visual is None:
                 continue
@@ -183,8 +106,6 @@ class RobotRenderer:
 
             geo_type = None
             params = ()
-            mesh_file = None
-            
             if geom.find("cylinder") is not None:
                 cyl = geom.find("cylinder")
                 geo_type = "cylinder"
@@ -197,24 +118,11 @@ class RobotRenderer:
                 sph = geom.find("sphere")
                 geo_type = "sphere"
                 params = (float(sph.get("radius", "0.02")),)
-            elif geom.find("mesh") is not None:
-                mesh_el = geom.find("mesh")
-                filename = mesh_el.get("filename")
-                if filename:
-                    # Resolve relative path
-                    mesh_path = (self.urdf_dir / filename).resolve()
-                    if mesh_path.exists():
-                        geo_type = "mesh"
-                        mesh_file = str(mesh_path)
-                        print(f"Loading mesh: {mesh_file}")
-                        self.meshes[name] = load_stl(mesh_file)
-                        print(f"Loaded {len(self.meshes[name])} triangles for {name}")
 
             self.links[name] = {
                 "name": name,
                 "type": geo_type,
                 "params": params,
-                "mesh_file": mesh_file,
                 "origin_xyz": xyz,
                 "origin_rpy": rpy,
                 "color": rgba[:3],
@@ -226,13 +134,6 @@ class RobotRenderer:
             jtype = joint.get("type", "fixed")
             parent = joint.find("parent").get("link")
             child = joint.find("child").get("link")
-            
-            # Skip joints where parent is world - these connect to root link
-            if parent == 'world':
-                # This is the root link
-                self.root_link = child
-                continue
-            
             origin = joint.find("origin")
             jxyz = [0.0, 0.0, 0.0]
             jrpy = [0.0, 0.0, 0.0]
@@ -256,16 +157,14 @@ class RobotRenderer:
             self.link_joints[child] = self.joints[jname]
             self.joint_values[jname] = 0.0
 
-        # If root link wasn't found from world joint, find it manually
-        if self.root_link is None:
-            all_children = set(self.link_joints.keys())
-            for name in self.links:
-                if name not in all_children:
-                    self.root_link = name
-                    break
+        # Find root link (no parent joint)
+        all_children = set(self.link_joints.keys())
+        for name in self.links:
+            if name not in all_children:
+                self.root_link = name
+                break
 
         print(f"Loaded {len(self.links)} links, {len(self.joints)} joints from URDF")
-        print(f"Root link: {self.root_link}")
         return len(self.links) > 0
 
     def set_joints(self, q_list):
@@ -308,22 +207,18 @@ class GLWidget(QtOpenGLWidgets.QOpenGLWidget):
     def initializeGL(self):
         gl.glClearColor(0.15, 0.15, 0.18, 1.0)
         gl.glEnable(GL_DEPTH_TEST)
-        gl.glEnable(gl.GL_LIGHTING)
-        gl.glEnable(gl.GL_LIGHT0)
-        gl.glEnable(gl.GL_COLOR_MATERIAL)
-        gl.glColorMaterial(gl.GL_FRONT_AND_BACK, gl.GL_AMBIENT_AND_DIFFUSE)
-        
-        # Set light position
-        gl.glLightfv(gl.GL_LIGHT0, gl.GL_POSITION, (0.5, 1.0, 2.0, 0.0))
+        # 将调试信息写入文件（避免终端缓冲问题）
+        with open("viewer_debug.log", "w", encoding="utf-8") as f:
+            fmt = self.context().format()
+            f.write(f"initializeGL called\n")
+            f.write(f"GL version: {fmt.majorVersion()}.{fmt.minorVersion()}\n")
+            f.write(f"Profile: {fmt.profile()}\n")
+            f.write(f"Renderer: {str(self.context().functions())[:100]}\n")
 
     def paintGL(self):
         gl.glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
 
         w, h = self.width(), self.height()
-        
-        # Debug: check if robot is loaded
-        if not self.renderer.links:
-            return  # Don't draw if no robot loaded
 
         # Projection
         gl.glMatrixMode(GL_PROJECTION)
@@ -346,7 +241,7 @@ class GLWidget(QtOpenGLWidgets.QOpenGLWidget):
         cz = self.camera_dist * math.sin(el)
 
         eye = np.array([cx, cy, cz], dtype=np.float64)
-        center = np.array([0.0, 0.0, 0.0], dtype=np.float64)  # Center at origin
+        center = np.array([0.0, 0.0, 0.4], dtype=np.float64)
         up_vec = np.array([0.0, 0.0, 1.0], dtype=np.float64)
 
         f = center - eye
@@ -368,11 +263,24 @@ class GLWidget(QtOpenGLWidgets.QOpenGLWidget):
         gl.glLoadMatrixf(rot)
         gl.glTranslated(float(-eye[0]), float(-eye[1]), float(-eye[2]))
 
+        # Debug: draw a visible red triangle at origin
+        gl.glDisable(GL_DEPTH_TEST)
+        gl.glBegin(GL_TRIANGLES)
+        gl.glColor3f(1.0, 0.0, 0.0)
+        gl.glVertex3f(0.2, 0, 0)
+        gl.glVertex3f(0, 0.2, 0)
+        gl.glVertex3f(0, 0, 0.2)
+        gl.glEnd()
+        gl.glEnable(GL_DEPTH_TEST)
+
         self._draw_grid(gl)
         self._draw_robot(gl)
 
+        # 调试信息追加到日志
+        with open("viewer_debug.log", "a", encoding="utf-8") as f:
+            f.write(f"paintGL: size={w}x{h}, links={len(self.renderer.links)}, root={self.renderer.root_link}\n")
+
     def _draw_grid(self, gl):
-        gl.glDisable(gl.GL_LIGHTING)
         gl.glBegin(GL_LINES)
         gl.glColor3f(0.3, 0.3, 0.35)
         size = 1.0
@@ -384,7 +292,6 @@ class GLWidget(QtOpenGLWidgets.QOpenGLWidget):
             gl.glVertex3f(-size, x, 0)
             gl.glVertex3f(size, x, 0)
         gl.glEnd()
-        gl.glEnable(gl.GL_LIGHTING)
 
     def _draw_robot(self, gl):
         """Recursively draw the kinematic tree with proper transforms."""
@@ -402,22 +309,22 @@ class GLWidget(QtOpenGLWidgets.QOpenGLWidget):
 
         # Apply parent joint transform (for non-root links)
         if parent_joint is not None:
-            # Apply joint rotation first (if revolute) - this is the variable part
-            q = r.joint_values.get(parent_joint["name"], 0.0)
-            if parent_joint["type"] == "revolute" and q != 0:
-                ax, ay, az = parent_joint["axis"]
-                gl.glRotatef(math.degrees(q), ax, ay, az)
+            # Apply joint origin rotation (URDF extrinsic XYZ order)
+            jrx, jry, jrz = parent_joint["origin_rpy"]
+            if any(v != 0 for v in [jrx, jry, jrz]):
+                gl.glRotatef(math.degrees(jrx), 1, 0, 0)
+                gl.glRotatef(math.degrees(jry), 0, 1, 0)
+                gl.glRotatef(math.degrees(jrz), 0, 0, 1)
             
             # Apply joint origin translation
             jx, jy, jz = parent_joint["origin_xyz"]
             gl.glTranslatef(jx, jy, jz)
             
-            # Apply joint origin rotation (URDF extrinsic ZYX order - yaw, pitch, roll)
-            jrx, jry, jrz = parent_joint["origin_rpy"]
-            if any(v != 0 for v in [jrx, jry, jrz]):
-                gl.glRotatef(math.degrees(jrz), 0, 0, 1)  # Z - yaw
-                gl.glRotatef(math.degrees(jry), 0, 1, 0)  # Y - pitch
-                gl.glRotatef(math.degrees(jrx), 1, 0, 0)  # X - roll
+            # Apply joint rotation (if revolute)
+            q = r.joint_values.get(parent_joint["name"], 0.0)
+            if parent_joint["type"] == "revolute" and q != 0:
+                ax, ay, az = parent_joint["axis"]
+                gl.glRotatef(math.degrees(q), ax, ay, az)
 
         # Draw joint indicator at link origin
         self._draw_joint_indicator(gl, 0.02)
@@ -426,10 +333,9 @@ class GLWidget(QtOpenGLWidgets.QOpenGLWidget):
         ox, oy, oz = link["origin_xyz"]
         orx, ory, orz = link["origin_rpy"]
         if any(v != 0 for v in [orx, ory, orz]):
-            # Apply rotation in ZYX order (yaw, pitch, roll)
-            gl.glRotatef(math.degrees(orz), 0, 0, 1)  # Z - yaw
-            gl.glRotatef(math.degrees(ory), 0, 1, 0)  # Y - pitch
-            gl.glRotatef(math.degrees(orx), 1, 0, 0)  # X - roll
+            gl.glRotatef(math.degrees(orx), 1, 0, 0)
+            gl.glRotatef(math.degrees(ory), 0, 1, 0)
+            gl.glRotatef(math.degrees(orz), 0, 0, 1)
         gl.glTranslatef(ox, oy, oz)
 
         # Draw geometry
@@ -465,8 +371,6 @@ class GLWidget(QtOpenGLWidgets.QOpenGLWidget):
             gl.glTranslatef(radius + marker_size*0.5, 0, 0)
             self._draw_sphere(gl, marker_size*0.8)
             gl.glPopMatrix()
-        elif geo == "mesh":
-            self._draw_mesh(gl, link_name)
 
         # Recursively draw child links through joints (transform is accumulated)
         for jname, joint in r.joints.items():
@@ -476,24 +380,9 @@ class GLWidget(QtOpenGLWidgets.QOpenGLWidget):
         # Pop matrix AFTER drawing all child links
         gl.glPopMatrix()
 
-    def _draw_mesh(self, gl, link_name):
-        """Draw an STL mesh using direct rendering (display list temporarily disabled)."""
-        triangles = self.renderer.meshes.get(link_name, [])
-        if not triangles:
-            return
-        
-        # Direct rendering for now
-        gl.glBegin(GL_TRIANGLES)
-        for normal, v1, v2, v3 in triangles:
-            gl.glNormal3f(*normal)
-            gl.glVertex3f(*v1)
-            gl.glVertex3f(*v2)
-            gl.glVertex3f(*v3)
-        gl.glEnd()
-
     def _draw_joint_indicator(self, gl, size):
         """Draw a small RGB axis at joint origin, plus a small indicator box on X-axis to show rotation."""
-        gl.glDisable(gl.GL_LIGHTING)
+        gl.glDisable(GL_DEPTH_TEST)
         gl.glBegin(GL_LINES)
         # X - red
         gl.glColor3f(1.0, 0.2, 0.2)
@@ -542,7 +431,7 @@ class GLWidget(QtOpenGLWidgets.QOpenGLWidget):
         gl.glVertex3f(size*1.3, box_size, box_size)
         gl.glVertex3f(size*0.7, box_size, box_size)
         gl.glEnd()
-        gl.glEnable(gl.GL_LIGHTING)
+        gl.glEnable(GL_DEPTH_TEST)
 
     def _draw_cylinder(self, gl, radius, length):
         segments = 24
@@ -634,16 +523,16 @@ class GLWidget(QtOpenGLWidgets.QOpenGLWidget):
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             self.dragging = True
-            self.last_pos = event.position().toPoint()
+            self.last_pos = event.pos()
 
     def mouseMoveEvent(self, event):
         if self.dragging and self.last_pos:
-            dx = event.position().x() - self.last_pos.x()
-            dy = event.position().y() - self.last_pos.y()
+            dx = event.pos().x() - self.last_pos.x()
+            dy = event.pos().y() - self.last_pos.y()
             self.camera_az -= dx * 0.5
             self.camera_el += dy * 0.5
             self.camera_el = max(-89, min(89, self.camera_el))
-            self.last_pos = event.position().toPoint()
+            self.last_pos = event.pos()
             self.update()
 
     def mouseReleaseEvent(self, event):
@@ -660,7 +549,7 @@ class GLWidget(QtOpenGLWidgets.QOpenGLWidget):
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, urdf_path=None):
         super().__init__()
-        self.setWindowTitle("OpenRoboOLP Python Viewer v0.2.0 (STL Mesh Support)")
+        self.setWindowTitle("OpenRoboOLP Python Viewer v0.1.0")
         self.resize(1200, 800)
 
         central = QtWidgets.QWidget()
@@ -685,15 +574,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self.load_robot(urdf_path)
 
     def load_robot(self, path):
-        # Clear display lists before loading new robot
-        try:
-            import OpenGL.GL as gl
-            for display_list_id in self.gl_widget.renderer.mesh_display_lists.values():
-                if display_list_id > 0:
-                    gl.glDeleteLists(display_list_id, 1)
-        except:
-            pass
-        
         if not self.gl_widget.load_robot(path):
             QtWidgets.QMessageBox.critical(self, "Error", f"Failed to load URDF: {path}")
             return
@@ -761,7 +641,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.panel.layout().addStretch()
 
         # Set default pose
-        self.zero_all()
+        self.home_pose()
 
     def on_joint_changed(self, value, label, jname):
         deg = value / 10.0
