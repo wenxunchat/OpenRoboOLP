@@ -9,6 +9,7 @@ Usage:
 
 import sys
 import math
+import struct
 import numpy as np
 from pathlib import Path
 
@@ -24,6 +25,69 @@ try:
 except ImportError:
     print("PyOpenGL not installed. Install with: pip install PyOpenGL")
     sys.exit(1)
+
+
+def load_stl(filename):
+    """Load an STL file (binary or ASCII)."""
+    try:
+        with open(filename, 'rb') as f:
+            # Check if it's a binary STL
+            header = f.read(80)
+            num_triangles = struct.unpack('<I', f.read(4))[0]
+            
+            # Quick check: if num_triangles * 50 bytes + 84 bytes equals file size, it's binary
+            f.seek(0, 2)
+            file_size = f.tell()
+            f.seek(84)
+            
+            if file_size == 84 + num_triangles * 50:
+                # Binary STL
+                triangles = []
+                for _ in range(num_triangles):
+                    normal = struct.unpack('<fff', f.read(12))
+                    v1 = struct.unpack('<fff', f.read(12))
+                    v2 = struct.unpack('<fff', f.read(12))
+                    v3 = struct.unpack('<fff', f.read(12))
+                    f.read(2)  # attribute count
+                    triangles.append((normal, v1, v2, v3))
+                return triangles
+    except Exception:
+        pass
+    
+    # Try ASCII STL
+    try:
+        with open(filename, 'r') as f:
+            content = f.read()
+        
+        lines = content.splitlines()
+        triangles = []
+        i = 0
+        
+        while i < len(lines):
+            line = lines[i].strip()
+            if line.startswith('facet normal'):
+                parts = line.split()
+                normal = (float(parts[2]), float(parts[3]), float(parts[4]))
+                i += 1
+                while i < len(lines) and not lines[i].strip().startswith('endfacet'):
+                    if lines[i].strip().startswith('outer loop'):
+                        i += 1
+                        vertices = []
+                        while i < len(lines) and not lines[i].strip().startswith('endloop'):
+                            line = lines[i].strip()
+                            if line.startswith('vertex'):
+                                parts = line.split()
+                                vertices.append((float(parts[1]), float(parts[2]), float(parts[3])))
+                            i += 1
+                        if len(vertices) == 3:
+                            triangles.append((normal, vertices[0], vertices[1], vertices[2]))
+                    i += 1
+            i += 1
+        
+        return triangles
+    except Exception as e:
+        print(f"Error loading STL {filename}: {e}")
+        return []
 
 # OpenGL 常量（兼容直接引用）
 GL_COLOR_BUFFER_BIT = 0x00004000
@@ -71,6 +135,9 @@ class RobotRenderer:
         self.link_joints = {}    # link_name -> incoming joint
         self.root_link = None
         self.joint_values = {}
+        self.meshes = {}         # mesh_file -> triangles
+        self.mesh_display_lists = {}  # mesh_file -> display_list_id
+        self.urdf_dir = None     # Directory of the URDF file
 
     def load_urdf(self, path):
         """Parse URDF and build kinematic tree."""
@@ -78,10 +145,21 @@ class RobotRenderer:
         tree = ET.parse(path)
         root = tree.getroot()
 
+        # Clear display lists to avoid memory leak
+        import OpenGL.GL as gl
+        for display_list_id in self.mesh_display_lists.values():
+            try:
+                gl.glDeleteLists(display_list_id, 1)
+            except:
+                pass
+        
         self.links.clear()
         self.joints.clear()
         self.link_joints.clear()
         self.joint_values.clear()
+        self.meshes.clear()
+        self.mesh_display_lists.clear()
+        self.urdf_dir = Path(path).parent
 
         # Parse links
         for link in root.findall("link"):
@@ -106,7 +184,14 @@ class RobotRenderer:
 
             geo_type = None
             params = ()
-            if geom.find("cylinder") is not None:
+            mesh_file = None
+            
+            if geom.find("mesh") is not None:
+                mesh = geom.find("mesh")
+                geo_type = "mesh"
+                mesh_file = mesh.get("filename")
+                params = (mesh_file,)
+            elif geom.find("cylinder") is not None:
                 cyl = geom.find("cylinder")
                 geo_type = "cylinder"
                 params = (float(cyl.get("radius", "0.03")), float(cyl.get("length", "0.15")))
@@ -123,10 +208,13 @@ class RobotRenderer:
                 "name": name,
                 "type": geo_type,
                 "params": params,
+                "mesh_file": mesh_file,
                 "origin_xyz": xyz,
                 "origin_rpy": rpy,
                 "color": rgba[:3],
             }
+
+        print(f"Loaded {len(self.links)} links from URDF")
 
         # Parse joints
         for joint in root.findall("joint"):
@@ -157,14 +245,21 @@ class RobotRenderer:
             self.link_joints[child] = self.joints[jname]
             self.joint_values[jname] = 0.0
 
-        # Find root link (no parent joint)
+        # Find root link (no parent joint, or parent is world)
         all_children = set(self.link_joints.keys())
         for name in self.links:
             if name not in all_children:
                 self.root_link = name
                 break
+        
+        # Special handling: if parent is 'world', child is the root
+        if self.root_link is None:
+            for j in self.joints.values():
+                if j["parent"] == "world" and j["child"] in self.links:
+                    self.root_link = j["child"]
+                    break
 
-        print(f"Loaded {len(self.links)} links, {len(self.joints)} joints from URDF")
+        print(f"Loaded {len(self.links)} links, {len(self.joints)} joints from URDF, root={self.root_link}")
         return len(self.links) > 0
 
     def set_joints(self, q_list):
@@ -371,6 +466,10 @@ class GLWidget(QtOpenGLWidgets.QOpenGLWidget):
             gl.glTranslatef(radius + marker_size*0.5, 0, 0)
             self._draw_sphere(gl, marker_size*0.8)
             gl.glPopMatrix()
+        elif geo == "mesh":
+            mesh_file = link["mesh_file"]
+            if mesh_file:
+                self._draw_mesh(gl, mesh_file, link["color"])
 
         # Recursively draw child links through joints (transform is accumulated)
         for jname, joint in r.joints.items():
@@ -519,6 +618,45 @@ class GLWidget(QtOpenGLWidgets.QOpenGLWidget):
                 gl.glNormal3f(x * math.cos(lat1), y * math.cos(lat1), math.sin(lat1))
                 gl.glVertex3f(x * zr1, y * zr1, z1)
             gl.glEnd()
+
+    def _draw_mesh(self, gl, mesh_file, color):
+        """Draw an STL mesh using display list caching for performance."""
+        r = self.renderer
+        
+        # Check if mesh is already loaded
+        if mesh_file not in r.meshes:
+            # Resolve path relative to URDF file
+            mesh_path = (r.urdf_dir / mesh_file).resolve()
+            print(f"Loading mesh: {mesh_path}")
+            triangles = load_stl(str(mesh_path))
+            r.meshes[mesh_file] = triangles
+            print(f"Loaded {len(triangles)} triangles")
+        
+        # Check if display list exists, create if not
+        if mesh_file not in r.mesh_display_lists:
+            triangles = r.meshes.get(mesh_file, [])
+            if not triangles:
+                return
+            
+            # Create display list
+            display_list_id = gl.glGenLists(1)
+            gl.glNewList(display_list_id, gl.GL_COMPILE)
+            gl.glBegin(GL_TRIANGLES)
+            for normal, v1, v2, v3 in triangles:
+                gl.glNormal3f(*normal)
+                gl.glVertex3f(*v1)
+                gl.glVertex3f(*v2)
+                gl.glVertex3f(*v3)
+            gl.glEnd()
+            gl.glEndList()
+            r.mesh_display_lists[mesh_file] = display_list_id
+            print(f"Created display list for {mesh_file}")
+        
+        # Draw using display list
+        display_list_id = r.mesh_display_lists.get(mesh_file)
+        if display_list_id:
+            gl.glColor3f(*color)
+            gl.glCallList(display_list_id)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
