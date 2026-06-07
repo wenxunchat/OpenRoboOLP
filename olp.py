@@ -31,6 +31,8 @@ GL_QUADS = 0x00000007
 GL_QUAD_STRIP = 0x00000008
 GL_TRIANGLE_FAN = 0x00000006
 GL_LINES = 0x00000001
+GL_LINE_STRIP = 0x00000003
+GL_POINTS = 0x00000000
 GL_DEPTH_TEST = 0x00000B71
 GL_MODELVIEW = 0x00001700
 GL_PROJECTION = 0x00001701
@@ -157,6 +159,9 @@ class GLWidget(QtOpenGLWidgets.QOpenGLWidget):
         self.camera_el = 30.0
         self.dragging = False
         self.last_pos = None
+        self.recorded_positions = []
+        self.recorded_ee_positions = []
+        self.show_path = True
 
     def load_robot(self, path):
         success = self.renderer.load_urdf(path)
@@ -166,6 +171,171 @@ class GLWidget(QtOpenGLWidgets.QOpenGLWidget):
     def set_joints(self, q):
         self.renderer.set_joints(q)
         self.update()
+
+    def get_joint_values(self):
+        return dict(self.renderer.joint_values)
+
+    def set_joint_values(self, joint_dict):
+        for name, value in joint_dict.items():
+            self.renderer.joint_values[name] = value
+        self.update()
+
+    def record_position(self):
+        pos = self.get_joint_values()
+        if pos:
+            self.recorded_positions.append(pos)
+            ee_pos = self._compute_end_effector_position()
+            self.recorded_ee_positions.append(ee_pos)
+        return len(self.recorded_positions)
+
+    def clear_recorded_positions(self):
+        self.recorded_positions.clear()
+        self.recorded_ee_positions.clear()
+
+    def get_recorded_positions(self):
+        return self.recorded_positions
+
+    def set_recorded_positions(self, positions):
+        self.recorded_positions = positions
+        # 重新计算末端执行器位置
+        original_joint_values = dict(self.renderer.joint_values)
+        self.recorded_ee_positions.clear()
+        for pos in positions:
+            self.set_joint_values(pos)
+            ee_pos = self._compute_end_effector_position()
+            self.recorded_ee_positions.append(ee_pos)
+        self.set_joint_values(original_joint_values)
+
+    def _compute_end_effector_position(self):
+        """计算末端执行器的3D位置"""
+        if self.renderer.root_link is None:
+            return (0.0, 0.0, 0.0)
+        
+        # 找到末端链接（没有子节点的链接）
+        def find_end_effector(link_name):
+            has_child = False
+            for joint in self.renderer.joints.values():
+                if joint["parent"] == link_name:
+                    has_child = True
+                    result = find_end_effector(joint["child"])
+                    if result is not None:
+                        return result
+            if not has_child:
+                return link_name
+            return None
+        
+        ee_link_name = find_end_effector(self.renderer.root_link)
+        if ee_link_name is None:
+            return (0.0, 0.0, 0.0)
+        
+        # 递归计算变换矩阵
+        def compute_transform(link_name, parent_joint=None):
+            transform = np.eye(4, dtype=np.float64)
+            
+            if parent_joint is not None:
+                jx, jy, jz = parent_joint["origin_xyz"]
+                jrx, jry, jrz = parent_joint["origin_rpy"]
+                
+                # 应用关节原点平移
+                trans = np.eye(4)
+                trans[0, 3] = jx
+                trans[1, 3] = jy
+                trans[2, 3] = jz
+                transform = trans @ transform
+                
+                # 应用关节原点旋转 (Z-Y-X)
+                if jrz != 0:
+                    c, s = math.cos(jrz), math.sin(jrz)
+                    rot = np.array([[c, -s, 0, 0], [s, c, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]])
+                    transform = rot @ transform
+                if jry != 0:
+                    c, s = math.cos(jry), math.sin(jry)
+                    rot = np.array([[c, 0, s, 0], [0, 1, 0, 0], [-s, 0, c, 0], [0, 0, 0, 1]])
+                    transform = rot @ transform
+                if jrx != 0:
+                    c, s = math.cos(jrx), math.sin(jrx)
+                    rot = np.array([[1, 0, 0, 0], [0, c, -s, 0], [0, s, c, 0], [0, 0, 0, 1]])
+                    transform = rot @ transform
+                
+                # 应用关节旋转
+                q = self.renderer.joint_values.get(parent_joint["name"], 0.0)
+                if parent_joint["type"] == "revolute" and q != 0:
+                    ax, ay, az = parent_joint["axis"]
+                    # 绕任意轴旋转
+                    angle = q
+                    c, s = math.cos(angle), math.sin(angle)
+                    t = 1 - c
+                    rot = np.array([
+                        [t*ax*ax + c, t*ax*ay - s*az, t*ax*az + s*ay, 0],
+                        [t*ax*ay + s*az, t*ay*ay + c, t*ay*az - s*ax, 0],
+                        [t*ax*az - s*ay, t*ay*az + s*ax, t*az*az + c, 0],
+                        [0, 0, 0, 1]
+                    ])
+                    transform = rot @ transform
+            
+            link = self.renderer.links.get(link_name)
+            if link is None:
+                return transform
+            
+            # 应用链接原点变换
+            ox, oy, oz = link["origin_xyz"]
+            orx, ory, orz = link["origin_rpy"]
+            
+            if orx != 0 or ory != 0 or orz != 0:
+                if orz != 0:
+                    c, s = math.cos(orz), math.sin(orz)
+                    rot = np.array([[c, -s, 0, 0], [s, c, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]])
+                    transform = rot @ transform
+                if ory != 0:
+                    c, s = math.cos(ory), math.sin(ory)
+                    rot = np.array([[c, 0, s, 0], [0, 1, 0, 0], [-s, 0, c, 0], [0, 0, 0, 1]])
+                    transform = rot @ transform
+                if orx != 0:
+                    c, s = math.cos(orx), math.sin(orx)
+                    rot = np.array([[1, 0, 0, 0], [0, c, -s, 0], [0, s, c, 0], [0, 0, 0, 1]])
+                    transform = rot @ transform
+            
+            trans = np.eye(4)
+            trans[0, 3] = ox
+            trans[1, 3] = oy
+            trans[2, 3] = oz
+            transform = trans @ transform
+            
+            return transform
+        
+        # 从根节点到末端链接计算完整变换
+        def get_path_to_ee(link_name, target_name):
+            if link_name == target_name:
+                return []
+            for joint in self.renderer.joints.values():
+                if joint["parent"] == link_name:
+                    path = get_path_to_ee(joint["child"], target_name)
+                    if path is not None:
+                        return [joint] + path
+            return None
+        
+        path = get_path_to_ee(self.renderer.root_link, ee_link_name)
+        if path is None:
+            return (0.0, 0.0, 0.0)
+        
+        # 计算完整变换矩阵
+        transform = np.eye(4)
+        current_link = self.renderer.root_link
+        for joint in path:
+            link = self.renderer.links.get(current_link)
+            if link:
+                # 应用父链接的变换
+                transform = compute_transform(current_link, None) @ transform
+            current_link = joint["child"]
+        
+        # 最后应用末端链接的变换
+        final_transform = compute_transform(ee_link_name, None)
+        transform = final_transform @ transform
+        
+        # 原点经过变换后的位置
+        origin = np.array([0.0, 0.0, 0.0, 1.0])
+        result = transform @ origin
+        return (float(result[0]), float(result[1]), float(result[2]))
 
     def initializeGL(self):
         gl.glClearColor(0.15, 0.15, 0.18, 1.0)
@@ -219,6 +389,8 @@ class GLWidget(QtOpenGLWidgets.QOpenGLWidget):
 
         self._draw_grid()
         self._draw_robot()
+        if self.show_path and len(self.recorded_positions) > 1:
+            self._draw_recorded_path()
 
     def _draw_grid(self):
         gl.glBegin(GL_LINES)
@@ -363,6 +535,27 @@ class GLWidget(QtOpenGLWidgets.QOpenGLWidget):
                 gl.glVertex3f(x * zr1, y * zr1, z1)
             gl.glEnd()
 
+    def _draw_recorded_path(self):
+        if not self.recorded_ee_positions or len(self.recorded_ee_positions) < 2:
+            return
+        # 绘制路径线
+        gl.glLineWidth(2.0)
+        gl.glColor3f(0.2, 0.8, 0.2)
+        gl.glBegin(GL_LINE_STRIP)
+        for pos in self.recorded_ee_positions:
+            x, y, z = pos
+            gl.glVertex3f(x, y, z)
+        gl.glEnd()
+        
+        # 绘制路径点
+        gl.glPointSize(5.0)
+        gl.glColor3f(1.0, 0.3, 0.3)
+        gl.glBegin(GL_POINTS)
+        for pos in self.recorded_ee_positions:
+            x, y, z = pos
+            gl.glVertex3f(x, y, z)
+        gl.glEnd()
+
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             self.dragging = True
@@ -390,14 +583,136 @@ class GLWidget(QtOpenGLWidgets.QOpenGLWidget):
         self.update()
 
 
-class PathCodeEditor(QtWidgets.QTextEdit):
+class PathCodeEditor(QtWidgets.QWidget):
+    positionRecorded = Signal(int)
+    playbackRequested = Signal(int)
+    playbackStopped = Signal()
+    clearRequested = Signal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFont(QFont("Consolas", 10))
-        self.setStyleSheet("background-color: #1a1a1a; color: #e0e0e0;")
-        self.setLineWrapMode(QtWidgets.QTextEdit.NoWrap)
-        self.setTabStopDistance(20)
+        self.recorded_positions = []
+        self.playback_timer = None
+        self.current_playback_index = 0
+        self.playback_speed = 50
+        self._setup_ui()
         self.setPlainText("# OLP Path Code\nmovej([0, -90, 90, -90, 90, 0], vel=0.5)\n")
+
+    def _setup_ui(self):
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+
+        self.code_edit = QtWidgets.QTextEdit()
+        self.code_edit.setFont(QFont("Consolas", 10))
+        self.code_edit.setStyleSheet("background-color: #1a1a1a; color: #e0e0e0;")
+        self.code_edit.setLineWrapMode(QtWidgets.QTextEdit.NoWrap)
+        self.code_edit.setTabStopDistance(20)
+        layout.addWidget(self.code_edit)
+
+        control_layout = QtWidgets.QHBoxLayout()
+
+        self.record_btn = QtWidgets.QPushButton("● Record")
+        self.record_btn.setStyleSheet("background-color: #555555; color: white;")
+        self.record_btn.setCheckable(True)
+        self.record_btn.clicked.connect(self._on_record_toggled)
+
+        self.play_btn = QtWidgets.QPushButton("▶ Play")
+        self.play_btn.setStyleSheet("background-color: #4CAF50; color: white;")
+        self.play_btn.clicked.connect(self._on_play_clicked)
+
+        self.stop_btn = QtWidgets.QPushButton("■ Stop")
+        self.stop_btn.setStyleSheet("background-color: #f44336; color: white;")
+        self.stop_btn.clicked.connect(self._on_stop_clicked)
+
+        self.clear_btn = QtWidgets.QPushButton("Clear")
+        self.clear_btn.setStyleSheet("background-color: #777777; color: white;")
+        self.clear_btn.clicked.connect(self._on_clear_clicked)
+
+        self.pos_count_label = QtWidgets.QLabel("Positions: 0")
+        self.pos_count_label.setFont(QFont("Consolas", 9))
+
+        control_layout.addWidget(self.record_btn)
+        control_layout.addWidget(self.play_btn)
+        control_layout.addWidget(self.stop_btn)
+        control_layout.addWidget(self.clear_btn)
+        control_layout.addWidget(self.pos_count_label)
+        layout.addLayout(control_layout)
+
+    def _on_record_toggled(self, checked):
+        if checked:
+            self.record_btn.setText("● Recording")
+            self.record_btn.setStyleSheet("background-color: #f44336; color: white;")
+            self.record_btn.setIcon(QtGui.QIcon())
+        else:
+            self.record_btn.setText("● Record")
+            self.record_btn.setStyleSheet("background-color: #555555; color: white;")
+
+    def _on_play_clicked(self):
+        if self.playback_timer is None:
+            self.playback_timer = QtCore.QTimer(self)
+            self.playback_timer.timeout.connect(self._on_playback_tick)
+        if not self.playback_timer.isActive():
+            self.current_playback_index = 0
+            self.playback_timer.start(self.playback_speed)
+            self.playbackRequested.emit(0)
+
+    def _on_stop_clicked(self):
+        self._stop_playback()
+        self.playbackStopped.emit()
+
+    def _stop_playback(self):
+        if self.playback_timer and self.playback_timer.isActive():
+            self.playback_timer.stop()
+        self.playback_timer = None
+        self.current_playback_index = 0
+
+    def _on_playback_tick(self):
+        if self.current_playback_index < len(self.recorded_positions):
+            self.playbackRequested.emit(self.current_playback_index)
+            self.current_playback_index += 1
+        else:
+            self._stop_playback()
+            self.playbackStopped.emit()
+
+    def _on_clear_clicked(self):
+        self._stop_playback()
+        self.recorded_positions.clear()
+        self.pos_count_label.setText("Positions: 0")
+        self.code_edit.clear()
+        self.code_edit.append("# OLP Path Code\n")
+        self.clearRequested.emit()
+
+    def record_position(self, joint_values):
+        if self.record_btn.isChecked():
+            self.recorded_positions.append(dict(joint_values))
+            self.pos_count_label.setText(f"Positions: {len(self.recorded_positions)}")
+            self.positionRecorded.emit(len(self.recorded_positions))
+            self._update_code_with_positions()
+
+    def _update_code_with_positions(self):
+        self.code_edit.clear()
+        self.code_edit.append("# OLP Path Code")
+        self.code_edit.append(f"# Recorded positions: {len(self.recorded_positions)}")
+        self.code_edit.append("")
+        for i, pos in enumerate(self.recorded_positions):
+            joints_str = ", ".join([f"{v:.4f}" for v in pos.values()])
+            self.code_edit.append(f"pos_{i+1} = [{joints_str}]")
+
+    def get_recorded_positions(self):
+        return self.recorded_positions
+
+    def set_recorded_positions(self, positions):
+        self.recorded_positions = list(positions)
+        self.pos_count_label.setText(f"Positions: {len(self.recorded_positions)}")
+        self._update_code_with_positions()
+        self.update()
+
+    def toPlainText(self):
+        return self.code_edit.toPlainText()
+
+    def setPlainText(self, text):
+        self.code_edit.setPlainText(text)
 
 
 class DevicePropertyPanel(QtWidgets.QWidget):
@@ -510,12 +825,22 @@ class DevicePropertyPanel(QtWidgets.QWidget):
         self.log_text.append(f"Loaded: {renderer.robot_name}")
         self.log_text.append(f"Joints: {len(renderer.joints)}")
 
+    def update_joint_displays(self, joint_values):
+        for name, value in joint_values.items():
+            if name in self.value_labels:
+                self.value_labels[name].setText(f"{math.degrees(value):.2f}°")
+            if name in self.sliders:
+                self.sliders[name].blockSignals(True)
+                self.sliders[name].setValue(int(math.degrees(value) * 100))
+                self.sliders[name].blockSignals(False)
+
 
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, urdf_path=None):
         super().__init__()
         self.setWindowTitle("OpenRoboOLP Terminal v0.1.0")
         self.resize(1400, 900)
+        self._set_window_icon()
         self.setup_menu()
         self.setup_ui()
         self.urdf_path = urdf_path
@@ -551,6 +876,16 @@ class MainWindow(QtWidgets.QMainWindow):
         reset_view.triggered.connect(self.reset_view)
         view_menu.addAction(reset_view)
     
+    def _set_window_icon(self):
+        import sys
+        logo_path = Path(__file__).parent / "logo.png"
+        if hasattr(sys, '_MEIPASS'):
+            logo_path = Path(sys._MEIPASS) / "logo.png"
+        
+        if logo_path.exists():
+            icon = QtGui.QIcon(str(logo_path))
+            self.setWindowIcon(icon)
+    
     def setup_ui(self):
         central = QtWidgets.QWidget()
         self.setCentralWidget(central)
@@ -567,18 +902,12 @@ class MainWindow(QtWidgets.QMainWindow):
         
         left_header = QtWidgets.QLabel("<h3>Path Code Editor</h3>")
         left_layout.addWidget(left_header)
-        
+
         self.code_editor = PathCodeEditor()
+        self.code_editor.playbackRequested.connect(self.on_playback_requested)
+        self.code_editor.playbackStopped.connect(self.on_playback_stopped)
+        self.code_editor.clearRequested.connect(self.on_clear_requested)
         left_layout.addWidget(self.code_editor)
-        
-        code_btn_layout = QtWidgets.QHBoxLayout()
-        self.run_btn = QtWidgets.QPushButton("▶ Run")
-        self.run_btn.setStyleSheet("background-color: #4CAF50; color: white;")
-        self.stop_btn = QtWidgets.QPushButton("■ Stop")
-        self.stop_btn.setStyleSheet("background-color: #f44336; color: white;")
-        code_btn_layout.addWidget(self.run_btn)
-        code_btn_layout.addWidget(self.stop_btn)
-        left_layout.addLayout(code_btn_layout)
         
         main_layout.addWidget(left_panel)
         
@@ -607,13 +936,42 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self.property_panel.setup_joints(self.gl_widget.renderer)
         self.property_panel.update_robot_info(self.gl_widget.renderer)
+        self.property_panel.jointChanged.connect(self.on_joint_changed_for_record)
+        recorded = self.code_editor.get_recorded_positions()
+        if recorded:
+            self.gl_widget.set_recorded_positions(recorded)
         self.statusBar().showMessage(f"Loaded: {Path(path).name}")
         self.gl_widget.update()
-    
+
     def on_joint_changed(self, name, value):
         self.gl_widget.renderer.joint_values[name] = value
         self.gl_widget.update()
-    
+
+    def on_joint_changed_for_record(self, name, value):
+        self.gl_widget.renderer.joint_values[name] = value
+        self.gl_widget.update()
+        if self.code_editor.record_btn.isChecked():
+            # 当记录模式开启时，调用 GLWidget 的记录方法
+            count = self.gl_widget.record_position()
+            # 同步到 PathCodeEditor
+            self.code_editor.recorded_positions = self.gl_widget.get_recorded_positions()
+            self.code_editor.pos_count_label.setText(f"Positions: {count}")
+            self.code_editor._update_code_with_positions()
+
+    def on_playback_requested(self, index):
+        positions = self.code_editor.get_recorded_positions()
+        if 0 <= index < len(positions):
+            self.gl_widget.set_joint_values(positions[index])
+            self.property_panel.update_joint_displays(positions[index])
+            self.gl_widget.update()
+
+    def on_playback_stopped(self):
+        self.statusBar().showMessage("Playback finished")
+
+    def on_clear_requested(self):
+        self.gl_widget.clear_recorded_positions()
+        self.statusBar().showMessage("Recorded positions cleared")
+
     def save_path_code(self):
         file_path, _ = QtWidgets.QFileDialog.getSaveFileName(
             self, "Save Path Code", "", "Python Files (*.py);;All Files (*)"
