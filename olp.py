@@ -6,6 +6,7 @@ OpenRoboOLP - OLP Terminal
 import sys
 import math
 import struct
+import re
 import numpy as np
 from pathlib import Path
 
@@ -588,10 +589,12 @@ class PathCodeEditor(QtWidgets.QWidget):
     playbackRequested = Signal(int)
     playbackStopped = Signal()
     clearRequested = Signal()
+    positionsParsed = Signal()  # 新增：代码解析完成信号
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.recorded_positions = []
+        self.joint_names = []  # 存储关节名称顺序
         self.playback_timer = None
         self.current_playback_index = 0
         self.playback_speed = 50
@@ -649,6 +652,15 @@ class PathCodeEditor(QtWidgets.QWidget):
             self.record_btn.setStyleSheet("background-color: #555555; color: white;")
 
     def _on_play_clicked(self):
+        # 在播放前解析代码编辑器中的路径代码
+        self._parse_code_to_positions()
+        
+        if len(self.recorded_positions) == 0:
+            return
+        
+        # 通知主窗口更新 GLWidget 的路径可视化
+        self.positionsParsed.emit()
+            
         if self.playback_timer is None:
             self.playback_timer = QtCore.QTimer(self)
             self.playback_timer.timeout.connect(self._on_playback_tick)
@@ -696,8 +708,9 @@ class PathCodeEditor(QtWidgets.QWidget):
         self.code_edit.append(f"# Recorded positions: {len(self.recorded_positions)}")
         self.code_edit.append("")
         for i, pos in enumerate(self.recorded_positions):
-            joints_str = ", ".join([f"{v:.4f}" for v in pos.values()])
-            self.code_edit.append(f"pos_{i+1} = [{joints_str}]")
+            # 将弧度转换为角度显示
+            joints_str = ", ".join([f"{math.degrees(v):.2f}" for v in pos.values()])
+            self.code_edit.append(f"movej([{joints_str}], vel=0.5)")
 
     def get_recorded_positions(self):
         return self.recorded_positions
@@ -713,6 +726,42 @@ class PathCodeEditor(QtWidgets.QWidget):
 
     def setPlainText(self, text):
         self.code_edit.setPlainText(text)
+
+    def set_joint_names(self, names):
+        """设置关节名称顺序，用于解析代码"""
+        self.joint_names = list(names)
+
+    def _parse_code_to_positions(self):
+        """从代码编辑器中解析路径位置数据"""
+        code_text = self.code_edit.toPlainText()
+        self.recorded_positions.clear()
+        
+        # 匹配 movej([value1, value2, ...], vel=X.X) 格式
+        pattern = r'movej\(\s*\[([^\]]+)\]\s*(?:,\s*vel\s*=\s*[\d.]+)?\s*\)'
+        matches = re.findall(pattern, code_text)
+        
+        for match in matches:
+            # 解析数值列表（角度）
+            try:
+                values = [float(v.strip()) for v in match.split(',')]
+                # 将角度转换为弧度
+                rad_values = [math.radians(v) for v in values]
+                
+                if self.joint_names and len(values) == len(self.joint_names):
+                    # 如果有关节名称，创建字典
+                    pos_dict = {}
+                    for i, name in enumerate(self.joint_names):
+                        pos_dict[name] = rad_values[i]
+                    self.recorded_positions.append(pos_dict)
+                elif len(values) > 0:
+                    # 如果没有关节名称，使用索引作为键
+                    pos_dict = {f"joint_{i+1}": rad_values[i] for i in range(len(rad_values))}
+                    self.recorded_positions.append(pos_dict)
+            except ValueError:
+                continue
+        
+        # 更新位置计数显示
+        self.pos_count_label.setText(f"Positions: {len(self.recorded_positions)}")
 
 
 class DevicePropertyPanel(QtWidgets.QWidget):
@@ -865,6 +914,13 @@ class MainWindow(QtWidgets.QMainWindow):
         save_action.triggered.connect(self.save_path_code)
         file_menu.addAction(save_action)
         
+        load_action = QAction("&Load Path Code...", self)
+        load_action.setShortcut("Ctrl+O")
+        load_action.triggered.connect(self.load_path_code)
+        file_menu.addAction(load_action)
+        
+        file_menu.addSeparator()
+        
         exit_action = QAction("E&xit", self)
         exit_action.setShortcut(QKeySequence.Quit)
         exit_action.triggered.connect(self.close)
@@ -907,6 +963,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.code_editor.playbackRequested.connect(self.on_playback_requested)
         self.code_editor.playbackStopped.connect(self.on_playback_stopped)
         self.code_editor.clearRequested.connect(self.on_clear_requested)
+        self.code_editor.positionsParsed.connect(self.on_positions_parsed)
         left_layout.addWidget(self.code_editor)
         
         main_layout.addWidget(left_panel)
@@ -937,6 +994,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.property_panel.setup_joints(self.gl_widget.renderer)
         self.property_panel.update_robot_info(self.gl_widget.renderer)
         self.property_panel.jointChanged.connect(self.on_joint_changed_for_record)
+        
+        # 设置关节名称顺序，用于解析路径代码
+        joint_names = list(self.gl_widget.renderer.joints.keys())
+        self.code_editor.set_joint_names(joint_names)
+        
         recorded = self.code_editor.get_recorded_positions()
         if recorded:
             self.gl_widget.set_recorded_positions(recorded)
@@ -968,6 +1030,13 @@ class MainWindow(QtWidgets.QMainWindow):
     def on_playback_stopped(self):
         self.statusBar().showMessage("Playback finished")
 
+    def on_positions_parsed(self):
+        """当路径代码解析完成后，更新 GLWidget 的路径可视化"""
+        positions = self.code_editor.get_recorded_positions()
+        if positions:
+            self.gl_widget.set_recorded_positions(positions)
+            self.gl_widget.update()
+
     def on_clear_requested(self):
         self.gl_widget.clear_recorded_positions()
         self.statusBar().showMessage("Recorded positions cleared")
@@ -980,6 +1049,26 @@ class MainWindow(QtWidgets.QMainWindow):
             with open(file_path, 'w') as f:
                 f.write(self.code_editor.toPlainText())
             self.statusBar().showMessage(f"Saved: {Path(file_path).name}")
+    
+    def load_path_code(self):
+        file_path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Load Path Code", "", "Python Files (*.py);;Text Files (*.txt);;All Files (*)"
+        )
+        if file_path:
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    code_content = f.read()
+                self.code_editor.setPlainText(code_content)
+                # 解析代码并更新路径
+                self.code_editor._parse_code_to_positions()
+                # 更新 GLWidget 的路径可视化
+                positions = self.code_editor.get_recorded_positions()
+                if positions:
+                    self.gl_widget.set_recorded_positions(positions)
+                    self.gl_widget.update()
+                self.statusBar().showMessage(f"Loaded: {Path(file_path).name}")
+            except Exception as e:
+                QtWidgets.QMessageBox.critical(self, "Error", f"Failed to load path code: {e}")
     
     def reset_view(self):
         self.gl_widget.camera_dist = 1.2
